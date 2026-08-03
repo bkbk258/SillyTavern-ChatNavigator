@@ -4,7 +4,7 @@
  */
 
 (function () {
-    const extensionName = 'chat-navigator';
+    const extensionName = 'SillyTavern-ChatNavigator';
     const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
 
     // 设置存储 key
@@ -12,7 +12,7 @@
 
     // 默认设置
     const defaultSettings = {
-        bookmarks: {}, // { chatId: [{ mesId, label }] }
+        bookmarks: {}, // { chatId: [{ start, end, label }] }
     };
 
     // 状态
@@ -97,7 +97,7 @@
                 <!-- 书签面板 -->
                 <div class="cn-section" data-section="bookmark">
                     <div class="cn-bookmark-add">
-                        <input type="text" id="cn-bm-id" placeholder="楼层号" style="max-width:70px">
+                        <input type="text" id="cn-bm-id" placeholder="楼层号或区间，如 200 / 30-100" style="max-width:160px">
                         <input type="text" id="cn-bm-label" placeholder="书签名称">
                         <button class="cn-btn" id="cn-bm-add-btn">+</button>
                     </div>
@@ -233,10 +233,10 @@
             showToast('请输入有效的楼层号');
             return;
         }
-        scrollToMessage(mesId);
+        void scrollToMessage(mesId);
     }
 
-    function gotoRange() {
+    async function gotoRange() {
         const input = $('#cn-range-input').val().trim();
         const match = input.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
         if (!match) {
@@ -252,90 +252,118 @@
 
         const context = SillyTavern.getContext();
         const chat = context.chat;
-        if (start >= chat.length) {
-            showToast(`楼层 ${start} 超出范围（共 ${chat.length} 楼）`);
+        if (!chat || start >= chat.length) {
+            showToast(`楼层 ${start} 超出范围（共 ${chat?.length ?? 0} 楼）`);
             return;
         }
 
-        // 清除之前的区间高亮
         $('.cn-range-start, .cn-range-end').removeClass('cn-range-start cn-range-end');
 
-        // 跳转到起始楼层
-        scrollToMessage(start);
+        const jumped = await scrollToMessage(start);
+        if (!jumped) return;
 
-        // 标记区间边界
+        const actualEnd = Math.min(end, chat.length - 1);
         setTimeout(() => {
             const startEl = $(`.mes[mesid="${start}"]`);
-            const actualEnd = Math.min(end, chat.length - 1);
             const endEl = $(`.mes[mesid="${actualEnd}"]`);
             if (startEl.length) startEl.addClass('cn-range-start');
             if (endEl.length) endEl.addClass('cn-range-end');
-        }, 400);
+        }, 120);
     }
 
     function gotoTop() {
-        scrollToMessage(0);
+        void scrollToMessage(0);
     }
 
     function gotoBottom() {
         const context = SillyTavern.getContext();
         const chat = context.chat;
         if (chat.length > 0) {
-            scrollToMessage(chat.length - 1);
+            void scrollToMessage(chat.length - 1);
         }
     }
 
-    function scrollToMessage(mesId) {
+    async function scrollToMessage(mesId) {
         const context = SillyTavern.getContext();
-        const chat = context.chat;
+        const chat = context.chat || [];
 
         if (mesId < 0 || mesId >= chat.length) {
-            showToast(`楼层 ${mesId} 不存在（共 ${chat.length} 楼，编号 0-${chat.length - 1}）`);
-            return;
+            showToast(`楼层 ${mesId} 不存在（共 ${chat.length} 楼，编号 0-${Math.max(0, chat.length - 1)}）`);
+            return false;
         }
 
-        // 清除之前的高亮
         $('.cn-highlight').removeClass('cn-highlight');
 
-        const messageEl = $(`.mes[mesid="${mesId}"]`);
-        if (messageEl.length) {
-            // DOM 存在，直接滚动
-            const chatContainer = $('#chat');
-            chatContainer.animate({
-                scrollTop: messageEl[0].offsetTop - chatContainer[0].offsetTop,
-            }, 300, function () {
-                messageEl.addClass('cn-highlight');
-            });
-        } else {
-            // DOM 不存在（可能是隐藏消息或懒加载）
-            // 尝试找到最近的可见消息
-            let nearest = findNearestVisibleMessage(mesId);
-            if (nearest !== null) {
-                const nearEl = $(`.mes[mesid="${nearest}"]`);
-                if (nearEl.length) {
-                    const chatContainer = $('#chat');
-                    chatContainer.animate({
-                        scrollTop: nearEl[0].offsetTop - chatContainer[0].offsetTop,
-                    }, 300, function () {
-                        nearEl.addClass('cn-highlight');
-                    });
-                    if (nearest !== mesId) {
-                        showToast(`楼层 ${mesId} 未渲染，已跳转到最近的 #${nearest}`);
-                    }
-                }
-            } else {
-                showToast(`无法定位楼层 ${mesId}`);
-            }
+        const target = await ensureMessageRendered(mesId);
+        if (target && target.length) {
+            scrollElementIntoView(target, true);
+            return true;
         }
+
+        const fallback = await sweepForMessage(mesId);
+        if (fallback && fallback.length) {
+            scrollElementIntoView(fallback, true);
+            showToast(`楼层 ${mesId} 未立即渲染，已定位到附近内容`);
+            return true;
+        }
+
+        showToast(`无法定位楼层 ${mesId}`);
+        return false;
     }
 
-    function findNearestVisibleMessage(mesId) {
-        // 向两边搜索最近的已渲染消息
-        for (let offset = 0; offset <= 50; offset++) {
-            if ($(`.mes[mesid="${mesId + offset}"]`).length) return mesId + offset;
-            if (mesId - offset >= 0 && $(`.mes[mesid="${mesId - offset}"]`).length) return mesId - offset;
+    async function ensureMessageRendered(mesId) {
+        const chatContainer = $('#chat');
+        for (let i = 0; i < 8; i++) {
+            const target = $(`.mes[mesid="${mesId}"]`);
+            if (target.length) {
+                return target;
+            }
+
+            chatContainer.stop(true).scrollTop(estimateScrollTopForMessage(mesId)).trigger('scroll');
+            await waitForRender();
         }
+
+        return $(`.mes[mesid="${mesId}"]`);
+    }
+
+    async function sweepForMessage(mesId) {
+        const chatContainer = $('#chat');
+        const total = Math.max(1, SillyTavern.getContext().chat?.length || 1);
+        const checkpoints = [0, 0.25, 0.5, 0.75, 1];
+
+        for (const ratio of checkpoints) {
+            chatContainer.stop(true).scrollTop(chatContainer[0].scrollHeight * ratio).trigger('scroll');
+            await waitForRender();
+            const target = $(`.mes[mesid="${mesId}"]`);
+            if (target.length) {
+                return target;
+            }
+        }
+
         return null;
+    }
+
+    function estimateScrollTopForMessage(mesId) {
+        const chatContainer = $('#chat');
+        const total = Math.max(1, SillyTavern.getContext().chat?.length || 1);
+        const ratio = Math.min(Math.max(mesId / total, 0), 1);
+        return chatContainer[0].scrollHeight * ratio;
+    }
+
+    function scrollElementIntoView(messageEl, shouldHighlight) {
+        const chatContainer = $('#chat');
+        const targetTop = Math.max(0, messageEl[0].offsetTop - chatContainer[0].offsetTop - 24);
+        chatContainer.stop(true).animate({
+            scrollTop: targetTop,
+        }, 250, function () {
+            if (shouldHighlight) {
+                messageEl.addClass('cn-highlight');
+            }
+        });
+    }
+
+    function waitForRender() {
+        return new Promise(resolve => setTimeout(resolve, 180));
     }
 
     // ============ 核心功能：搜索 ============
@@ -365,7 +393,6 @@
             const msg = chat[i];
             if (!msg) continue;
 
-            // 应用过滤器
             if (currentFilter === 'user' && !msg.is_user) continue;
             if (currentFilter === 'char' && msg.is_user) continue;
             if (currentFilter === 'hidden' && !msg.is_system) continue;
@@ -373,16 +400,13 @@
             let matched = false;
 
             if (isDateQuery) {
-                // 日期搜索：匹配 send_date 字段
                 const sendDate = msg.send_date || '';
                 if (sendDate.includes(query) || sendDate.includes(query.replace(/-/g, '/'))) {
                     matched = true;
                 }
             } else {
-                // 关键词搜索：匹配消息内容和角色名
-                const content = (msg.mes || '').toLowerCase();
-                const name = (msg.name || '').toLowerCase();
-                if (content.includes(queryLower) || name.includes(queryLower)) {
+                const content = String(msg.mes || '').toLowerCase();
+                if (content.includes(queryLower)) {
                     matched = true;
                 }
             }
@@ -390,11 +414,10 @@
             if (matched) {
                 searchResults.push({
                     mesId: i,
-                    name: msg.name || '未知',
                     isUser: msg.is_user || false,
                     isHidden: msg.is_system || false,
                     date: msg.send_date || '',
-                    preview: (msg.mes || '').substring(0, 80),
+                    preview: String(msg.mes || '').substring(0, 80),
                 });
             }
         }
@@ -422,7 +445,6 @@
             <div class="cn-result-item ${hiddenClass}" data-mesid="${result.mesId}">
                 <div class="cn-result-meta">
                     <span class="cn-result-id">#${result.mesId}</span>
-                    <span class="cn-result-name">${escapeHtml(result.name)}</span>
                     <span class="cn-result-date">${formatDate(result.date)}</span>
                 </div>
                 <div class="cn-result-preview">${escapeHtml(result.preview)}</div>
@@ -468,9 +490,45 @@
     function addBookmark() {
         const mesIdInput = $('#cn-bm-id').val().trim();
         const label = $('#cn-bm-label').val().trim();
+        const context = SillyTavern.getContext();
+        const chat = context.chat || [];
 
         if (!mesIdInput || !label) {
             showToast('请输入楼层号和书签名称');
+            return;
+        }
+
+        const rangeMatch = mesIdInput.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
+        const bookmarks = getBookmarks();
+
+        if (rangeMatch) {
+            const start = parseInt(rangeMatch[1], 10);
+            const end = parseInt(rangeMatch[2], 10);
+
+            if (start > end) {
+                showToast('区间书签起始楼层不能大于结束楼层');
+                return;
+            }
+
+            if (start < 0 || end >= chat.length) {
+                showToast(`楼层区间 ${start}-${end} 超出范围（共 ${chat.length} 楼）`);
+                return;
+            }
+
+            const key = `range:${start}-${end}`;
+            const existing = bookmarks.find(b => getBookmarkKey(b) === key);
+            if (existing) {
+                existing.label = label;
+            } else {
+                bookmarks.push({ type: 'range', start, end, label });
+            }
+
+            bookmarks.sort((a, b) => getBookmarkSortValue(a) - getBookmarkSortValue(b));
+            saveSettings();
+            renderBookmarks();
+            $('#cn-bm-id').val('');
+            $('#cn-bm-label').val('');
+            showToast(`区间书签已添加：#${start}-${end} ${label}`);
             return;
         }
 
@@ -480,42 +538,54 @@
             return;
         }
 
-        const context = SillyTavern.getContext();
-        if (mesId >= context.chat.length) {
-            showToast(`楼层 ${mesId} 超出范围`);
+        if (mesId >= chat.length) {
+            showToast(`楼层 ${mesId} 超出范围（共 ${chat.length} 楼）`);
             return;
         }
 
-        const bookmarks = getBookmarks();
-
-        // 检查是否已存在同楼层书签
-        const existing = bookmarks.find(b => b.mesId === mesId);
+        const existing = bookmarks.find(b => getBookmarkKey(b) === `single:${mesId}`);
         if (existing) {
             existing.label = label;
         } else {
-            bookmarks.push({ mesId, label });
+            bookmarks.push({ type: 'single', mesId, label });
         }
 
-        // 按楼层号排序
-        bookmarks.sort((a, b) => a.mesId - b.mesId);
-
+        bookmarks.sort((a, b) => getBookmarkSortValue(a) - getBookmarkSortValue(b));
         saveSettings();
         renderBookmarks();
 
-        // 清空输入
         $('#cn-bm-id').val('');
         $('#cn-bm-label').val('');
 
         showToast(`书签已添加：#${mesId} ${label}`);
     }
 
-    function deleteBookmark(mesId) {
+    function deleteBookmarkByKey(key) {
         const chatId = getChatId();
         if (settings.bookmarks[chatId]) {
-            settings.bookmarks[chatId] = settings.bookmarks[chatId].filter(b => b.mesId !== mesId);
+            settings.bookmarks[chatId] = settings.bookmarks[chatId].filter(b => getBookmarkKey(b) !== key);
             saveSettings();
             renderBookmarks();
         }
+    }
+
+    function getBookmarkKey(bookmark) {
+        if (!bookmark) return '';
+        if (bookmark.type === 'range') {
+            return `range:${bookmark.start}-${bookmark.end}`;
+        }
+        if (typeof bookmark.start === 'number' && typeof bookmark.end === 'number') {
+            return `range:${bookmark.start}-${bookmark.end}`;
+        }
+        const mesId = typeof bookmark.mesId === 'number' ? bookmark.mesId : bookmark.start;
+        return `single:${mesId}`;
+    }
+
+    function getBookmarkSortValue(bookmark) {
+        if (!bookmark) return 0;
+        if (bookmark.type === 'range') return bookmark.start;
+        if (typeof bookmark.start === 'number') return bookmark.start;
+        return bookmark.mesId ?? 0;
     }
 
     function renderBookmarks() {
@@ -523,35 +593,58 @@
         const bookmarks = getBookmarks();
 
         if (bookmarks.length === 0) {
-            container.html('<div class="cn-bookmark-empty">暂无书签<br>在上方添加楼层号和名称来创建书签</div>');
+            container.html('<div class="cn-bookmark-empty">暂无书签<br>在上方添加楼层号或区间来创建书签</div>');
             return;
         }
 
         let html = '';
         for (const bm of bookmarks) {
+            const key = getBookmarkKey(bm);
+            const isRange = bm.type === 'range' || (typeof bm.start === 'number' && typeof bm.end === 'number');
+            const start = isRange ? (bm.start ?? bm.mesId) : (bm.mesId ?? bm.start);
+            const end = isRange ? (bm.end ?? bm.start) : null;
+            const floorText = isRange ? `#${start}-${end}` : `#${start}`;
+            const jumpFloor = isRange ? start : start;
+            const jumpEnd = isRange ? end : start;
             html += `
-            <div class="cn-bookmark-item" data-mesid="${bm.mesId}">
-                <span class="cn-bookmark-id">#${bm.mesId}</span>
+            <div class="cn-bookmark-item" data-key="${key}" data-start="${jumpFloor}" data-end="${jumpEnd}">
+                <span class="cn-bookmark-id">${floorText}</span>
                 <span class="cn-bookmark-label">${escapeHtml(bm.label)}</span>
-                <span class="cn-bookmark-delete" data-mesid="${bm.mesId}" title="删除">✕</span>
+                <span class="cn-bookmark-delete" data-key="${key}" title="取消收藏">✕</span>
             </div>`;
         }
 
         container.html(html);
 
-        // 点击跳转
         container.find('.cn-bookmark-item').on('click', function (e) {
             if ($(e.target).hasClass('cn-bookmark-delete')) return;
-            const mesId = parseInt($(this).data('mesid'), 10);
-            scrollToMessage(mesId);
+            const start = parseInt($(this).data('start'), 10);
+            const end = parseInt($(this).data('end'), 10);
+            if (!isNaN(end) && end !== start) {
+                markRangeAndScroll(start, end);
+                return;
+            }
+            scrollToMessage(start);
         });
 
-        // 删除书签
         container.find('.cn-bookmark-delete').on('click', function (e) {
             e.stopPropagation();
-            const mesId = parseInt($(this).data('mesid'), 10);
-            deleteBookmark(mesId);
+            const key = String($(this).data('key'));
+            deleteBookmarkByKey(key);
         });
+    }
+
+    async function markRangeAndScroll(start, end) {
+        $('.cn-range-start, .cn-range-end').removeClass('cn-range-start cn-range-end');
+        const jumped = await scrollToMessage(start);
+        if (!jumped) return;
+
+        setTimeout(() => {
+            const startEl = $(`.mes[mesid="${start}"]`);
+            const endEl = $(`.mes[mesid="${end}"]`);
+            if (startEl.length) startEl.addClass('cn-range-start');
+            if (endEl.length) endEl.addClass('cn-range-end');
+        }, 180);
     }
 
     // ============ 核心功能：导出 ============
