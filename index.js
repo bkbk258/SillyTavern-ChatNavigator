@@ -1,0 +1,718 @@
+/**
+ * 命途扉页 - SillyTavern 聊天楼层导航器
+ * 功能：楼层跳转、区间定位、关键词搜索、书签收藏、区间导出
+ */
+
+(function () {
+    const extensionName = 'chat-navigator';
+    const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
+
+    // 设置存储 key
+    const SETTINGS_KEY = 'chat_navigator';
+
+    // 默认设置
+    const defaultSettings = {
+        bookmarks: {}, // { chatId: [{ mesId, label }] }
+    };
+
+    // 状态
+    let settings = {};
+    let searchResults = [];
+    let searchPage = 0;
+    const RESULTS_PER_PAGE = 50;
+    let searchDebounceTimer = null;
+    let currentExportFormat = 'md';
+    let currentFilter = 'all'; // all, user, char, hidden
+
+    // ============ 初始化 ============
+
+    function init() {
+        loadSettings();
+        injectUI();
+        bindEvents();
+        console.log('[命途扉页] 插件已加载');
+    }
+
+    function loadSettings() {
+        const context = SillyTavern.getContext();
+        if (!context.extensionSettings[SETTINGS_KEY]) {
+            context.extensionSettings[SETTINGS_KEY] = structuredClone(defaultSettings);
+        }
+        settings = context.extensionSettings[SETTINGS_KEY];
+    }
+
+    function saveSettings() {
+        const context = SillyTavern.getContext();
+        context.extensionSettings[SETTINGS_KEY] = settings;
+        context.saveSettingsDebounced();
+    }
+
+    // ============ UI 注入 ============
+
+    function injectUI() {
+        const panelHTML = `
+        <div id="chat-navigator-toggle" title="命途扉页">📖</div>
+        <div id="chat-navigator-panel" class="collapsed">
+            <div class="cn-header">
+                <h3>📖 命途扉页</h3>
+                <span class="cn-close">✕</span>
+            </div>
+            <div class="cn-tabs">
+                <div class="cn-tab active" data-tab="navigate">导航</div>
+                <div class="cn-tab" data-tab="search">搜索</div>
+                <div class="cn-tab" data-tab="bookmark">书签</div>
+                <div class="cn-tab" data-tab="export">导出</div>
+            </div>
+            <div class="cn-body">
+                <!-- 导航面板 -->
+                <div class="cn-section active" data-section="navigate">
+                    <div class="cn-input-group">
+                        <input type="text" id="cn-goto-input" placeholder="输入楼层号，如 200">
+                        <button class="cn-btn" id="cn-goto-btn">跳转</button>
+                    </div>
+                    <div class="cn-input-group">
+                        <input type="text" id="cn-range-input" placeholder="输入区间，如 30-100">
+                        <button class="cn-btn" id="cn-range-btn">定位</button>
+                    </div>
+                    <div class="cn-quick-btns">
+                        <button class="cn-btn" id="cn-top-btn">⬆ 顶部</button>
+                        <button class="cn-btn" id="cn-bottom-btn">⬇ 底部</button>
+                    </div>
+                </div>
+
+                <!-- 搜索面板 -->
+                <div class="cn-section" data-section="search">
+                    <div class="cn-input-group">
+                        <input type="text" id="cn-search-input" placeholder="关键词 / 日期(2026-01-01)">
+                    </div>
+                    <div class="cn-filter-row">
+                        <span class="cn-filter-chip active" data-filter="all">全部</span>
+                        <span class="cn-filter-chip" data-filter="user">用户</span>
+                        <span class="cn-filter-chip" data-filter="char">角色</span>
+                        <span class="cn-filter-chip" data-filter="hidden">隐藏</span>
+                    </div>
+                    <div class="cn-results" id="cn-results"></div>
+                </div>
+
+                <!-- 书签面板 -->
+                <div class="cn-section" data-section="bookmark">
+                    <div class="cn-bookmark-add">
+                        <input type="text" id="cn-bm-id" placeholder="楼层号" style="max-width:70px">
+                        <input type="text" id="cn-bm-label" placeholder="书签名称">
+                        <button class="cn-btn" id="cn-bm-add-btn">+</button>
+                    </div>
+                    <div id="cn-bookmarks-list"></div>
+                </div>
+
+                <!-- 导出面板 -->
+                <div class="cn-section" data-section="export">
+                    <div class="cn-input-group">
+                        <input type="text" id="cn-export-range" placeholder="导出区间，如 0-100">
+                    </div>
+                    <div class="cn-export-format">
+                        <span class="cn-filter-chip active" data-format="md">.md</span>
+                        <span class="cn-filter-chip" data-format="txt">.txt</span>
+                        <span class="cn-filter-chip" data-format="jsonl">.jsonl</span>
+                    </div>
+                    <div class="cn-quick-btns">
+                        <button class="cn-btn" id="cn-export-btn">📥 导出文件</button>
+                        <button class="cn-btn" id="cn-copy-btn">📋 复制</button>
+                    </div>
+                </div>
+            </div>
+            <div class="cn-position" id="cn-position">总楼层：-</div>
+        </div>`;
+
+        $('body').append(panelHTML);
+    }
+
+    // ============ 事件绑定 ============
+
+    function bindEvents() {
+        // 面板开关
+        $('#chat-navigator-toggle').on('click', togglePanel);
+        $('.cn-close').on('click', closePanel);
+
+        // Tab 切换
+        $('.cn-tab').on('click', function () {
+            const tab = $(this).data('tab');
+            $('.cn-tab').removeClass('active');
+            $(this).addClass('active');
+            $('.cn-section').removeClass('active');
+            $(`.cn-section[data-section="${tab}"]`).addClass('active');
+        });
+
+        // 导航功能
+        $('#cn-goto-btn').on('click', gotoFloor);
+        $('#cn-goto-input').on('keydown', function (e) {
+            if (e.key === 'Enter') gotoFloor();
+        });
+        $('#cn-range-btn').on('click', gotoRange);
+        $('#cn-range-input').on('keydown', function (e) {
+            if (e.key === 'Enter') gotoRange();
+        });
+        $('#cn-top-btn').on('click', gotoTop);
+        $('#cn-bottom-btn').on('click', gotoBottom);
+
+        // 搜索功能
+        $('#cn-search-input').on('input', function () {
+            clearTimeout(searchDebounceTimer);
+            searchDebounceTimer = setTimeout(performSearch, 300);
+        });
+        $('#cn-search-input').on('keydown', function (e) {
+            if (e.key === 'Enter') {
+                clearTimeout(searchDebounceTimer);
+                performSearch();
+            }
+        });
+
+        // 搜索过滤
+        $('.cn-filter-row .cn-filter-chip').on('click', function () {
+            $('.cn-filter-row .cn-filter-chip').removeClass('active');
+            $(this).addClass('active');
+            currentFilter = $(this).data('filter');
+            performSearch();
+        });
+
+        // 书签
+        $('#cn-bm-add-btn').on('click', addBookmark);
+        $('#cn-bm-label').on('keydown', function (e) {
+            if (e.key === 'Enter') addBookmark();
+        });
+
+        // 导出格式切换
+        $('.cn-export-format .cn-filter-chip').on('click', function () {
+            $('.cn-export-format .cn-filter-chip').removeClass('active');
+            $(this).addClass('active');
+            currentExportFormat = $(this).data('format');
+        });
+
+        // 导出按钮
+        $('#cn-export-btn').on('click', exportRange);
+        $('#cn-copy-btn').on('click', copyRange);
+
+        // 监听聊天变化，更新楼层信息
+        const context = SillyTavern.getContext();
+        const { eventSource, event_types } = context;
+        if (eventSource && event_types) {
+            eventSource.on(event_types.CHAT_CHANGED, updatePosition);
+            eventSource.on(event_types.MESSAGE_RECEIVED, updatePosition);
+            eventSource.on(event_types.MESSAGE_SENT, updatePosition);
+        }
+
+        // 初始更新
+        setTimeout(updatePosition, 500);
+    }
+
+    // ============ 面板控制 ============
+
+    function togglePanel() {
+        const panel = $('#chat-navigator-panel');
+        const toggle = $('#chat-navigator-toggle');
+        if (panel.hasClass('collapsed')) {
+            panel.removeClass('collapsed');
+            toggle.addClass('panel-open');
+            updatePosition();
+            renderBookmarks();
+        } else {
+            closePanel();
+        }
+    }
+
+    function closePanel() {
+        $('#chat-navigator-panel').addClass('collapsed');
+        $('#chat-navigator-toggle').removeClass('panel-open');
+    }
+
+    // ============ 核心功能：楼层跳转 ============
+
+    function gotoFloor() {
+        const input = $('#cn-goto-input').val().trim();
+        const mesId = parseInt(input, 10);
+        if (isNaN(mesId) || mesId < 0) {
+            showToast('请输入有效的楼层号');
+            return;
+        }
+        scrollToMessage(mesId);
+    }
+
+    function gotoRange() {
+        const input = $('#cn-range-input').val().trim();
+        const match = input.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
+        if (!match) {
+            showToast('请输入有效区间，如 30-100');
+            return;
+        }
+        const start = parseInt(match[1], 10);
+        const end = parseInt(match[2], 10);
+        if (start > end) {
+            showToast('起始楼层不能大于结束楼层');
+            return;
+        }
+
+        const context = SillyTavern.getContext();
+        const chat = context.chat;
+        if (start >= chat.length) {
+            showToast(`楼层 ${start} 超出范围（共 ${chat.length} 楼）`);
+            return;
+        }
+
+        // 清除之前的区间高亮
+        $('.cn-range-start, .cn-range-end').removeClass('cn-range-start cn-range-end');
+
+        // 跳转到起始楼层
+        scrollToMessage(start);
+
+        // 标记区间边界
+        setTimeout(() => {
+            const startEl = $(`.mes[mesid="${start}"]`);
+            const actualEnd = Math.min(end, chat.length - 1);
+            const endEl = $(`.mes[mesid="${actualEnd}"]`);
+            if (startEl.length) startEl.addClass('cn-range-start');
+            if (endEl.length) endEl.addClass('cn-range-end');
+        }, 400);
+    }
+
+    function gotoTop() {
+        scrollToMessage(0);
+    }
+
+    function gotoBottom() {
+        const context = SillyTavern.getContext();
+        const chat = context.chat;
+        if (chat.length > 0) {
+            scrollToMessage(chat.length - 1);
+        }
+    }
+
+    function scrollToMessage(mesId) {
+        const context = SillyTavern.getContext();
+        const chat = context.chat;
+
+        if (mesId < 0 || mesId >= chat.length) {
+            showToast(`楼层 ${mesId} 不存在（共 ${chat.length} 楼，编号 0-${chat.length - 1}）`);
+            return;
+        }
+
+        // 清除之前的高亮
+        $('.cn-highlight').removeClass('cn-highlight');
+
+        const messageEl = $(`.mes[mesid="${mesId}"]`);
+        if (messageEl.length) {
+            // DOM 存在，直接滚动
+            const chatContainer = $('#chat');
+            chatContainer.animate({
+                scrollTop: messageEl[0].offsetTop - chatContainer[0].offsetTop,
+            }, 300, function () {
+                messageEl.addClass('cn-highlight');
+            });
+        } else {
+            // DOM 不存在（可能是隐藏消息或懒加载）
+            // 尝试找到最近的可见消息
+            let nearest = findNearestVisibleMessage(mesId);
+            if (nearest !== null) {
+                const nearEl = $(`.mes[mesid="${nearest}"]`);
+                if (nearEl.length) {
+                    const chatContainer = $('#chat');
+                    chatContainer.animate({
+                        scrollTop: nearEl[0].offsetTop - chatContainer[0].offsetTop,
+                    }, 300, function () {
+                        nearEl.addClass('cn-highlight');
+                    });
+                    if (nearest !== mesId) {
+                        showToast(`楼层 ${mesId} 未渲染，已跳转到最近的 #${nearest}`);
+                    }
+                }
+            } else {
+                showToast(`无法定位楼层 ${mesId}`);
+            }
+        }
+    }
+
+    function findNearestVisibleMessage(mesId) {
+        // 向两边搜索最近的已渲染消息
+        for (let offset = 0; offset <= 50; offset++) {
+            if ($(`.mes[mesid="${mesId + offset}"]`).length) return mesId + offset;
+            if (mesId - offset >= 0 && $(`.mes[mesid="${mesId - offset}"]`).length) return mesId - offset;
+        }
+        return null;
+    }
+
+    // ============ 核心功能：搜索 ============
+
+    function performSearch() {
+        const query = $('#cn-search-input').val().trim();
+        if (!query) {
+            $('#cn-results').html('<div class="cn-no-results">输入关键词开始搜索</div>');
+            return;
+        }
+
+        const context = SillyTavern.getContext();
+        const chat = context.chat;
+
+        if (!chat || chat.length === 0) {
+            $('#cn-results').html('<div class="cn-no-results">当前没有聊天记录</div>');
+            return;
+        }
+
+        searchResults = [];
+        searchPage = 0;
+
+        const queryLower = query.toLowerCase();
+        const isDateQuery = /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(query);
+
+        for (let i = 0; i < chat.length; i++) {
+            const msg = chat[i];
+            if (!msg) continue;
+
+            // 应用过滤器
+            if (currentFilter === 'user' && !msg.is_user) continue;
+            if (currentFilter === 'char' && msg.is_user) continue;
+            if (currentFilter === 'hidden' && !msg.is_system) continue;
+
+            let matched = false;
+
+            if (isDateQuery) {
+                // 日期搜索：匹配 send_date 字段
+                const sendDate = msg.send_date || '';
+                if (sendDate.includes(query) || sendDate.includes(query.replace(/-/g, '/'))) {
+                    matched = true;
+                }
+            } else {
+                // 关键词搜索：匹配消息内容和角色名
+                const content = (msg.mes || '').toLowerCase();
+                const name = (msg.name || '').toLowerCase();
+                if (content.includes(queryLower) || name.includes(queryLower)) {
+                    matched = true;
+                }
+            }
+
+            if (matched) {
+                searchResults.push({
+                    mesId: i,
+                    name: msg.name || '未知',
+                    isUser: msg.is_user || false,
+                    isHidden: msg.is_system || false,
+                    date: msg.send_date || '',
+                    preview: (msg.mes || '').substring(0, 80),
+                });
+            }
+        }
+
+        renderSearchResults();
+    }
+
+    function renderSearchResults() {
+        const container = $('#cn-results');
+
+        if (searchResults.length === 0) {
+            container.html('<div class="cn-no-results">未找到匹配结果</div>');
+            return;
+        }
+
+        const startIdx = 0;
+        const endIdx = Math.min((searchPage + 1) * RESULTS_PER_PAGE, searchResults.length);
+        const visibleResults = searchResults.slice(startIdx, endIdx);
+
+        let html = `<div class="cn-results-info">找到 ${searchResults.length} 条结果</div>`;
+
+        for (const result of visibleResults) {
+            const hiddenClass = result.isHidden ? 'cn-result-hidden' : '';
+            html += `
+            <div class="cn-result-item ${hiddenClass}" data-mesid="${result.mesId}">
+                <div class="cn-result-meta">
+                    <span class="cn-result-id">#${result.mesId}</span>
+                    <span class="cn-result-name">${escapeHtml(result.name)}</span>
+                    <span class="cn-result-date">${formatDate(result.date)}</span>
+                </div>
+                <div class="cn-result-preview">${escapeHtml(result.preview)}</div>
+            </div>`;
+        }
+
+        if (endIdx < searchResults.length) {
+            html += `<div class="cn-load-more" id="cn-load-more">加载更多（还有 ${searchResults.length - endIdx} 条）</div>`;
+        }
+
+        container.html(html);
+
+        // 绑定点击跳转
+        container.find('.cn-result-item').on('click', function () {
+            const mesId = parseInt($(this).data('mesid'), 10);
+            scrollToMessage(mesId);
+        });
+
+        // 加载更多
+        container.find('#cn-load-more').on('click', function () {
+            searchPage++;
+            renderSearchResults();
+        });
+    }
+
+    // ============ 核心功能：书签 ============
+
+    function getChatId() {
+        const context = SillyTavern.getContext();
+        // 用当前角色 + 聊天文件名做唯一标识
+        const chatId = context.getCurrentChatId?.() || `${context.characterId}_${context.chatId}` || 'default';
+        return String(chatId);
+    }
+
+    function getBookmarks() {
+        const chatId = getChatId();
+        if (!settings.bookmarks[chatId]) {
+            settings.bookmarks[chatId] = [];
+        }
+        return settings.bookmarks[chatId];
+    }
+
+    function addBookmark() {
+        const mesIdInput = $('#cn-bm-id').val().trim();
+        const label = $('#cn-bm-label').val().trim();
+
+        if (!mesIdInput || !label) {
+            showToast('请输入楼层号和书签名称');
+            return;
+        }
+
+        const mesId = parseInt(mesIdInput, 10);
+        if (isNaN(mesId) || mesId < 0) {
+            showToast('楼层号无效');
+            return;
+        }
+
+        const context = SillyTavern.getContext();
+        if (mesId >= context.chat.length) {
+            showToast(`楼层 ${mesId} 超出范围`);
+            return;
+        }
+
+        const bookmarks = getBookmarks();
+
+        // 检查是否已存在同楼层书签
+        const existing = bookmarks.find(b => b.mesId === mesId);
+        if (existing) {
+            existing.label = label;
+        } else {
+            bookmarks.push({ mesId, label });
+        }
+
+        // 按楼层号排序
+        bookmarks.sort((a, b) => a.mesId - b.mesId);
+
+        saveSettings();
+        renderBookmarks();
+
+        // 清空输入
+        $('#cn-bm-id').val('');
+        $('#cn-bm-label').val('');
+
+        showToast(`书签已添加：#${mesId} ${label}`);
+    }
+
+    function deleteBookmark(mesId) {
+        const chatId = getChatId();
+        if (settings.bookmarks[chatId]) {
+            settings.bookmarks[chatId] = settings.bookmarks[chatId].filter(b => b.mesId !== mesId);
+            saveSettings();
+            renderBookmarks();
+        }
+    }
+
+    function renderBookmarks() {
+        const container = $('#cn-bookmarks-list');
+        const bookmarks = getBookmarks();
+
+        if (bookmarks.length === 0) {
+            container.html('<div class="cn-bookmark-empty">暂无书签<br>在上方添加楼层号和名称来创建书签</div>');
+            return;
+        }
+
+        let html = '';
+        for (const bm of bookmarks) {
+            html += `
+            <div class="cn-bookmark-item" data-mesid="${bm.mesId}">
+                <span class="cn-bookmark-id">#${bm.mesId}</span>
+                <span class="cn-bookmark-label">${escapeHtml(bm.label)}</span>
+                <span class="cn-bookmark-delete" data-mesid="${bm.mesId}" title="删除">✕</span>
+            </div>`;
+        }
+
+        container.html(html);
+
+        // 点击跳转
+        container.find('.cn-bookmark-item').on('click', function (e) {
+            if ($(e.target).hasClass('cn-bookmark-delete')) return;
+            const mesId = parseInt($(this).data('mesid'), 10);
+            scrollToMessage(mesId);
+        });
+
+        // 删除书签
+        container.find('.cn-bookmark-delete').on('click', function (e) {
+            e.stopPropagation();
+            const mesId = parseInt($(this).data('mesid'), 10);
+            deleteBookmark(mesId);
+        });
+    }
+
+    // ============ 核心功能：导出 ============
+
+    function getExportRange() {
+        const input = $('#cn-export-range').val().trim();
+        const match = input.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
+        if (!match) {
+            showToast('请输入有效的导出区间，如 0-100');
+            return null;
+        }
+        const start = parseInt(match[1], 10);
+        const end = parseInt(match[2], 10);
+        if (start > end) {
+            showToast('起始楼层不能大于结束楼层');
+            return null;
+        }
+        return { start, end };
+    }
+
+    function buildExportContent(start, end) {
+        const context = SillyTavern.getContext();
+        const chat = context.chat;
+        const actualEnd = Math.min(end, chat.length - 1);
+
+        const messages = [];
+        for (let i = start; i <= actualEnd; i++) {
+            const msg = chat[i];
+            if (!msg) continue;
+            messages.push({
+                id: i,
+                name: msg.name || '未知',
+                isUser: msg.is_user || false,
+                isHidden: msg.is_system || false,
+                date: msg.send_date || '',
+                content: msg.mes || '',
+            });
+        }
+        return messages;
+    }
+
+    function formatExport(messages, format) {
+        if (format === 'jsonl') {
+            return messages.map(m => JSON.stringify(m)).join('\n');
+        }
+
+        if (format === 'txt') {
+            return messages.map(m => {
+                const hidden = m.isHidden ? ' [隐藏]' : '';
+                return `[#${m.id}] ${m.name}${hidden} (${formatDate(m.date)}):\n${m.content}\n`;
+            }).join('\n---\n\n');
+        }
+
+        // md 格式
+        let md = `# 聊天记录导出\n\n`;
+        md += `> 区间：#${messages[0]?.id || 0} - #${messages[messages.length - 1]?.id || 0}  \n`;
+        md += `> 导出时间：${new Date().toLocaleString()}\n\n---\n\n`;
+
+        for (const m of messages) {
+            const hidden = m.isHidden ? ' `[隐藏]`' : '';
+            const role = m.isUser ? '👤' : '🤖';
+            md += `### ${role} #${m.id} ${m.name}${hidden}\n`;
+            md += `*${formatDate(m.date)}*\n\n`;
+            md += `${m.content}\n\n---\n\n`;
+        }
+
+        return md;
+    }
+
+    function exportRange() {
+        const range = getExportRange();
+        if (!range) return;
+
+        const messages = buildExportContent(range.start, range.end);
+        if (messages.length === 0) {
+            showToast('该区间没有消息');
+            return;
+        }
+
+        const content = formatExport(messages, currentExportFormat);
+        const ext = currentExportFormat;
+        const filename = `chat_${range.start}-${range.end}.${ext}`;
+
+        // 触发下载
+        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        showToast(`已导出 ${messages.length} 条消息：${filename}`);
+    }
+
+    function copyRange() {
+        const range = getExportRange();
+        if (!range) return;
+
+        const messages = buildExportContent(range.start, range.end);
+        if (messages.length === 0) {
+            showToast('该区间没有消息');
+            return;
+        }
+
+        const content = formatExport(messages, currentExportFormat);
+
+        navigator.clipboard.writeText(content).then(() => {
+            showToast(`已复制 ${messages.length} 条消息到剪贴板`);
+        }).catch(() => {
+            showToast('复制失败，请手动复制');
+        });
+    }
+
+    // ============ 辅助函数 ============
+
+    function updatePosition() {
+        const context = SillyTavern.getContext();
+        const chat = context.chat;
+        const total = chat ? chat.length : 0;
+        const hidden = chat ? chat.filter(m => m && m.is_system).length : 0;
+        $('#cn-position').text(`总楼层：${total}（隐藏：${hidden}）编号：0-${Math.max(0, total - 1)}`);
+    }
+
+    function showToast(message) {
+        // 使用 ST 内置的 toastr 如果可用
+        if (typeof toastr !== 'undefined') {
+            toastr.info(message, '命途扉页');
+        } else {
+            console.log(`[命途扉页] ${message}`);
+        }
+    }
+
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function formatDate(dateStr) {
+        if (!dateStr) return '';
+        // ST 的 send_date 格式通常是 "Month Day, Year HH:MM:SS" 或 ISO 格式
+        try {
+            const d = new Date(dateStr);
+            if (isNaN(d.getTime())) return dateStr.substring(0, 10);
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        } catch {
+            return dateStr.substring(0, 10);
+        }
+    }
+
+    // ============ 启动 ============
+
+    // 等待 jQuery 和 ST 就绪
+    if (typeof jQuery !== 'undefined') {
+        $(document).ready(function () {
+            init();
+        });
+    } else {
+        window.addEventListener('load', init);
+    }
+})();
