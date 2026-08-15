@@ -271,8 +271,29 @@
         }, 120);
     }
 
-    function gotoTop() {
-        void scrollToMessage(0);
+    async function gotoTop() {
+        $('.cn-range-start, .cn-range-end, .cn-highlight').removeClass('cn-range-start cn-range-end cn-highlight');
+
+        const chatContainer = $('#chat');
+        if (!chatContainer.length) {
+            showToast('无法找到聊天区域');
+            return;
+        }
+
+        const jumped = await scrollToMessage(0);
+        if (jumped) return;
+
+        for (let i = 0; i < 8; i++) {
+            chatContainer.stop(true).scrollTop(0).trigger('scroll');
+            await waitForRender(220);
+            const firstMessage = findRenderedMessage(0);
+            if (firstMessage.length) {
+                scrollElementIntoView(firstMessage, true);
+                return;
+            }
+        }
+
+        showToast('已回到聊天顶部附近');
     }
 
     function gotoBottom() {
@@ -294,53 +315,118 @@
 
         $('.cn-highlight').removeClass('cn-highlight');
 
-        const target = await ensureMessageRendered(mesId);
-        if (target && target.length) {
+        let target = findRenderedMessage(mesId);
+        if (target.length) {
             scrollElementIntoView(target, true);
             return true;
         }
 
-        const fallback = await sweepForMessage(mesId);
-        if (fallback && fallback.length) {
-            scrollElementIntoView(fallback, true);
-            showToast(`楼层 ${mesId} 未立即渲染，已定位到附近内容`);
+        target = await jumpWithSillyTavernCommand(mesId);
+        if (target.length) {
+            scrollElementIntoView(target, true);
             return true;
+        }
+
+        target = await calibrateScrollToMessage(mesId);
+        if (target.length) {
+            scrollElementIntoView(target, true);
+            return true;
+        }
+
+        const nearest = findNearestRenderedMessage(mesId);
+        if (nearest.element.length) {
+            scrollElementIntoView(nearest.element, true);
+            showToast(`楼层 ${mesId} 暂未渲染，已定位到附近楼层 #${nearest.mesId}`);
+            return false;
         }
 
         showToast(`无法定位楼层 ${mesId}`);
         return false;
     }
 
-    async function ensureMessageRendered(mesId) {
-        const chatContainer = $('#chat');
-        for (let i = 0; i < 8; i++) {
-            const target = $(`.mes[mesid="${mesId}"]`);
-            if (target.length) {
-                return target;
-            }
-
-            chatContainer.stop(true).scrollTop(estimateScrollTopForMessage(mesId)).trigger('scroll');
-            await waitForRender();
-        }
-
-        return $(`.mes[mesid="${mesId}"]`);
+    function findRenderedMessage(mesId) {
+        return $(`#chat .mes[mesid="${mesId}"]`);
     }
 
-    async function sweepForMessage(mesId) {
-        const chatContainer = $('#chat');
-        const total = Math.max(1, SillyTavern.getContext().chat?.length || 1);
-        const checkpoints = [0, 0.25, 0.5, 0.75, 1];
-
-        for (const ratio of checkpoints) {
-            chatContainer.stop(true).scrollTop(chatContainer[0].scrollHeight * ratio).trigger('scroll');
-            await waitForRender();
-            const target = $(`.mes[mesid="${mesId}"]`);
-            if (target.length) {
-                return target;
-            }
+    async function jumpWithSillyTavernCommand(mesId) {
+        const context = SillyTavern.getContext();
+        if (typeof context.executeSlashCommands !== 'function') {
+            return $();
         }
 
-        return null;
+        try {
+            await context.executeSlashCommands(`/chat-jump ${mesId}`);
+            await waitForRender(220);
+        } catch (error) {
+            console.debug('[命途扉页] /chat-jump 不可用，改用自有跳转兜底', error);
+        }
+
+        return findRenderedMessage(mesId);
+    }
+
+    async function calibrateScrollToMessage(mesId) {
+        const chatContainer = $('#chat');
+        if (!chatContainer.length) return $();
+
+        const maxAttempts = 18;
+        let lastRangeKey = '';
+        let stuckCount = 0;
+
+        for (let i = 0; i < maxAttempts; i++) {
+            const target = findRenderedMessage(mesId);
+            if (target.length) return target;
+
+            const range = getRenderedMessageRange();
+            if (!range) {
+                chatContainer.scrollTop(estimateScrollTopForMessage(mesId)).trigger('scroll');
+                await waitForRender(180);
+                continue;
+            }
+
+            const rangeKey = `${range.first}-${range.last}-${chatContainer.scrollTop()}`;
+            stuckCount = rangeKey === lastRangeKey ? stuckCount + 1 : 0;
+            lastRangeKey = rangeKey;
+
+            if (mesId < range.first) {
+                const nextTop = stuckCount >= 2 ? 0 : Math.max(0, chatContainer.scrollTop() - chatContainer.height() * 1.8);
+                chatContainer.stop(true).scrollTop(nextTop).trigger('scroll');
+            } else if (mesId > range.last) {
+                const nextTop = chatContainer.scrollTop() + chatContainer.height() * 1.8;
+                chatContainer.stop(true).scrollTop(nextTop).trigger('scroll');
+            } else {
+                chatContainer.stop(true).scrollTop(estimateScrollTopForMessage(mesId)).trigger('scroll');
+            }
+
+            await waitForRender(220);
+        }
+
+        return findRenderedMessage(mesId);
+    }
+
+    function getRenderedMessageRange() {
+        const ids = $('#chat .mes').map(function () {
+            return Number($(this).attr('mesid'));
+        }).get().filter(id => Number.isFinite(id));
+
+        if (!ids.length) return null;
+        return {
+            first: Math.min(...ids),
+            last: Math.max(...ids),
+        };
+    }
+
+    function findNearestRenderedMessage(mesId) {
+        let nearest = { mesId: null, element: $(), distance: Number.MAX_SAFE_INTEGER };
+        $('#chat .mes').each(function () {
+            const currentId = Number($(this).attr('mesid'));
+            if (!Number.isFinite(currentId)) return;
+
+            const distance = Math.abs(currentId - mesId);
+            if (distance < nearest.distance) {
+                nearest = { mesId: currentId, element: $(this), distance };
+            }
+        });
+        return nearest;
     }
 
     function estimateScrollTopForMessage(mesId) {
@@ -362,8 +448,8 @@
         });
     }
 
-    function waitForRender() {
-        return new Promise(resolve => setTimeout(resolve, 180));
+    function waitForRender(delay = 180) {
+        return new Promise(resolve => setTimeout(resolve, delay));
     }
 
     // ============ 核心功能：搜索 ============
