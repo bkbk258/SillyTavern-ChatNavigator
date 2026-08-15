@@ -418,3 +418,60 @@
     background: #c8ad93;
     border-radius: 999px;
 }
+
+@media (max-width: 768px) {
+    #chat-navigator-panel {
+        right: 10px;
+        top: auto;
+        bottom: max(14px, env(safe-area-inset-bottom));
+        transform: translateY(0);
+        width: min(360px, calc(100vw - 20px));
+        max-height: min(76vh, calc(100vh - 92px));
+        border: 1px solid #d9c8b2;
+        border-radius: 12px;
+    }
+
+    #chat-navigator-panel.collapsed {
+        transform: translateY(calc(100% + 18px));
+        pointer-events: none;
+    }
+
+    #chat-navigator-toggle {
+        right: max(12px, env(safe-area-inset-right));
+        top: auto;
+        bottom: max(18px, env(safe-area-inset-bottom));
+        transform: none;
+        width: 46px;
+        height: 46px;
+        border: 1px solid #d9c8b2;
+        border-radius: 50%;
+        box-shadow: 0 4px 18px rgba(70, 45, 25, 0.22);
+        font-size: 18px;
+    }
+
+    #chat-navigator-toggle.panel-open {
+        right: max(18px, env(safe-area-inset-right));
+        bottom: calc(min(76vh, calc(100vh - 92px)) + max(22px, env(safe-area-inset-bottom)));
+    }
+
+    .cn-header {
+        padding: 12px 14px;
+    }
+
+    .cn-body {
+        padding: 14px;
+    }
+
+    .cn-tabs {
+        padding: 10px 12px 0;
+    }
+
+    .cn-input-group,
+    .cn-bookmark-add {
+        gap: 8px;
+    }
+
+    .cn-btn {
+        padding: 9px 12px;
+    }
+}
