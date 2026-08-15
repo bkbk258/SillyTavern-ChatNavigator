@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "bk的殿下",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "homePage": "https://github.com/bkbk258/SillyTavern-ChatNavigator",
     "auto_update": false,
     "minimum_client_version": "1.13.0"
