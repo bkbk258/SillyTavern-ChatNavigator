@@ -13,6 +13,7 @@
     // 默认设置
     const defaultSettings = {
         bookmarks: {}, // { chatId: [{ start, end, label }] }
+        buttonPosition: null,
     };
 
     // 状态
@@ -23,6 +24,9 @@
     let searchDebounceTimer = null;
     let currentExportFormat = 'md';
     let currentFilter = 'all'; // all, user, char, hidden
+    let isDraggingToggle = false;
+    let didDragToggle = false;
+    let dragStart = { x: 0, y: 0, left: 0, top: 0 };
 
     // ============ 初始化 ============
 
@@ -40,6 +44,8 @@
             context.extensionSettings[SETTINGS_KEY] = structuredClone(defaultSettings);
         }
         settings = context.extensionSettings[SETTINGS_KEY];
+        settings.bookmarks ??= {};
+        settings.buttonPosition ??= null;
     }
 
     function saveSettings() {
@@ -125,14 +131,29 @@
         </div>`;
 
         $('body').append(panelHTML);
+        restoreTogglePosition();
+        positionPanelNearToggle();
     }
 
     // ============ 事件绑定 ============
 
     function bindEvents() {
         // 面板开关
-        $('#chat-navigator-toggle').on('click', togglePanel);
+        $('#chat-navigator-toggle')
+            .on('pointerdown', startToggleDrag)
+            .on('click', function (e) {
+                if (didDragToggle) {
+                    e.preventDefault();
+                    didDragToggle = false;
+                    return;
+                }
+                togglePanel();
+            });
         $('.cn-close').on('click', closePanel);
+        $(window).on('resize', function () {
+            keepToggleInViewport();
+            positionPanelNearToggle();
+        });
 
         // Tab 切换
         $('.cn-tab').on('click', function () {
@@ -213,6 +234,7 @@
         if (panel.hasClass('collapsed')) {
             panel.removeClass('collapsed');
             toggle.addClass('panel-open');
+            positionPanelNearToggle();
             updatePosition();
             renderBookmarks();
         } else {
@@ -223,6 +245,119 @@
     function closePanel() {
         $('#chat-navigator-panel').addClass('collapsed');
         $('#chat-navigator-toggle').removeClass('panel-open');
+    }
+
+    function restoreTogglePosition() {
+        const toggle = $('#chat-navigator-toggle');
+        const size = getToggleSize();
+        const margin = 12;
+        const saved = settings.buttonPosition;
+        const left = saved && Number.isFinite(saved.left) ? saved.left : window.innerWidth - size.width - margin;
+        const top = saved && Number.isFinite(saved.top) ? saved.top : Math.round(window.innerHeight * 0.58 - size.height / 2);
+        setTogglePosition(left, top, false);
+    }
+
+    function startToggleDrag(e) {
+        const originalEvent = e.originalEvent;
+        if (!originalEvent) return;
+
+        isDraggingToggle = true;
+        didDragToggle = false;
+        const toggle = $('#chat-navigator-toggle');
+        const rect = toggle[0].getBoundingClientRect();
+        dragStart = {
+            x: originalEvent.clientX,
+            y: originalEvent.clientY,
+            left: rect.left,
+            top: rect.top,
+        };
+
+        toggle.addClass('dragging');
+        toggle[0].setPointerCapture?.(originalEvent.pointerId);
+        $(document).on('pointermove.chatNavigator', dragToggle);
+        $(document).on('pointerup.chatNavigator pointercancel.chatNavigator', stopToggleDrag);
+    }
+
+    function dragToggle(e) {
+        if (!isDraggingToggle) return;
+        const originalEvent = e.originalEvent;
+        if (!originalEvent) return;
+
+        const deltaX = originalEvent.clientX - dragStart.x;
+        const deltaY = originalEvent.clientY - dragStart.y;
+        if (Math.abs(deltaX) + Math.abs(deltaY) > 6) {
+            didDragToggle = true;
+        }
+
+        setTogglePosition(dragStart.left + deltaX, dragStart.top + deltaY, false);
+        positionPanelNearToggle();
+    }
+
+    function stopToggleDrag() {
+        if (!isDraggingToggle) return;
+        isDraggingToggle = false;
+        $('#chat-navigator-toggle').removeClass('dragging');
+        $(document).off('.chatNavigator');
+        keepToggleInViewport();
+
+        const rect = $('#chat-navigator-toggle')[0].getBoundingClientRect();
+        settings.buttonPosition = { left: Math.round(rect.left), top: Math.round(rect.top) };
+        saveSettings();
+        positionPanelNearToggle();
+    }
+
+    function keepToggleInViewport() {
+        const rect = $('#chat-navigator-toggle')[0].getBoundingClientRect();
+        setTogglePosition(rect.left, rect.top, true);
+    }
+
+    function setTogglePosition(left, top, shouldSave) {
+        const toggle = $('#chat-navigator-toggle');
+        const size = getToggleSize();
+        const margin = 8;
+        const maxLeft = Math.max(margin, window.innerWidth - size.width - margin);
+        const maxTop = Math.max(margin, window.innerHeight - size.height - margin);
+        const safeLeft = Math.min(Math.max(left, margin), maxLeft);
+        const safeTop = Math.min(Math.max(top, margin), maxTop);
+
+        toggle.css({ left: `${safeLeft}px`, top: `${safeTop}px` });
+
+        if (shouldSave) {
+            settings.buttonPosition = { left: Math.round(safeLeft), top: Math.round(safeTop) };
+            saveSettings();
+        }
+    }
+
+    function getToggleSize() {
+        const toggle = $('#chat-navigator-toggle');
+        return {
+            width: toggle.outerWidth() || 52,
+            height: toggle.outerHeight() || 52,
+        };
+    }
+
+    function positionPanelNearToggle() {
+        const panel = $('#chat-navigator-panel');
+        const toggle = $('#chat-navigator-toggle');
+        if (!panel.length || !toggle.length || panel.hasClass('collapsed')) return;
+
+        const toggleRect = toggle[0].getBoundingClientRect();
+        const panelWidth = Math.min(360, window.innerWidth - 20);
+        const panelHeight = Math.min(panel.outerHeight() || 520, window.innerHeight - 20);
+        const margin = 10;
+
+        let left = toggleRect.left + toggleRect.width + margin;
+        if (left + panelWidth > window.innerWidth - margin) {
+            left = toggleRect.left - panelWidth - margin;
+        }
+        if (left < margin) {
+            left = Math.min(Math.max(window.innerWidth - panelWidth - margin, margin), window.innerWidth - margin);
+        }
+
+        let top = toggleRect.top + toggleRect.height / 2 - panelHeight / 2;
+        top = Math.min(Math.max(top, margin), Math.max(margin, window.innerHeight - panelHeight - margin));
+
+        panel.css({ left: `${left}px`, top: `${top}px`, right: 'auto', bottom: 'auto' });
     }
 
     // ============ 核心功能：楼层跳转 ============
