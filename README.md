@@ -55,7 +55,7 @@ SillyTavern/public/scripts/extensions/third-party/SillyTavern-ChatNavigator/
 
 ## 版本
 
-v1.0.2
+v1.0.3
 
 ## 作者
 
