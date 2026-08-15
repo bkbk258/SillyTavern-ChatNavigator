@@ -30,6 +30,7 @@
         loadSettings();
         injectUI();
         bindEvents();
+        closePanel();
         console.log('[命途扉页] 插件已加载');
     }
 
